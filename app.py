@@ -1,5 +1,57 @@
 import streamlit as st
 from datetime import date
+from openai import OpenAI
+from pydantic import BaseModel, Field
+from typing import List, Literal, Optional
+
+class TripSpec(BaseModel):
+    traveler_type: Optional[str] = Field(None, description="e.g., student, solo, family, couple")
+    budget_per_night_usd: int
+    origin_airport: str
+    start_date: str
+    end_date: str
+
+    prefer_mountains_over_cities: bool = True
+    adventure_level: Literal["low", "medium", "high"] = "medium"
+
+    preferred_cuisines: List[str] = Field(default_factory=list)
+    avoid: List[str] = Field(default_factory=list)
+    restaurant_vibes: List[str] = Field(default_factory=list)
+
+    nonstop_preference: Literal["require", "prefer", "dont_care"] = "prefer"
+    max_flight_hours: Optional[int] = None
+
+
+def parse_trip_spec(prefs: str, origin: str, start: str, end: str, budget: int) -> TripSpec:
+    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+
+    system = (
+        "You convert a user's travel preferences into a TripSpec object. "
+        "Be conservative: if something is not stated, choose a reasonable default. "
+        "Do not invent specific destinations yet."
+    )
+
+    user = f"""
+User free-text preferences:
+{prefs}
+
+Hard constraints:
+- origin_airport: {origin}
+- start_date: {start}
+- end_date: {end}
+- budget_per_night_usd: {budget}
+"""
+
+    response = client.responses.parse(
+        model="gpt-4o-mini",
+        input=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        text_format=TripSpec,
+    )
+
+    return response.output_parsed
 
 st.set_page_config(page_title="Travel Finder (MVP)", layout="wide")
 
@@ -28,6 +80,23 @@ with st.form("trip_form"):
     submitted = st.form_submit_button("Plan my trip")
 
 if submitted:
+
+    try:
+        trip_spec = parse_trip_spec(
+            prefs=prefs,
+            origin=origin,
+            start=str(start),
+            end=str(end),
+            budget=int(budget),
+        )
+        with st.expander("Debug: TripSpec (structured)"):
+            st.json(trip_spec.model_dump())
+    except Exception as e:
+        st.error("TripSpec parsing failed. Check your API key and logs.")
+        with st.expander("Debug: error details"):
+            st.write(e)
+
+
     st.subheader("Results (placeholder)")
     st.info("Next: we’ll convert your prompt into structured TripSpec JSON, then call real APIs.")
 
