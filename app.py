@@ -55,7 +55,7 @@ Hard constraints:
 
 st.set_page_config(page_title="Travel Finder (MVP)", layout="wide")
 
-st.title("Travel Finder (MVP) V0.1")
+st.title("Travel Finder (MVP) V0.2")
 st.write("Paste your preferences. We'll turn them into a trip plan.")
 
 with st.form("trip_form"):
