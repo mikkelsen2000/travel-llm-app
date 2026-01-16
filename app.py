@@ -221,6 +221,11 @@ st.set_page_config(page_title="Travel Finder (MVP)", layout="wide")
 st.title("Travel Finder (MVP) v0.2")
 st.write("Paste your preferences. We'll turn them into a trip plan.")
 
+if st.button("Start over (clear cached results)"):
+    st.session_state.clear()
+    st.rerun()
+
+
 with st.form("trip_form"):
     prefs = st.text_area(
         "Your travel prompt",
@@ -285,7 +290,30 @@ if submitted:
             st.warning("No destinations found (unexpected).")
             st.stop()
 
-        top_destination = destinations[0]["name"]
+        # Build a list of destination names for the radio button UI
+        destination_names = [d["name"] for d in destinations]
+
+        # Let the user choose which destination to explore
+        top_destination = st.radio(
+            "Choose a destination to explore:",
+            options=destination_names,
+            index=0,  # default: first suggestion
+        )
+        # Streamlit reruns the script often.
+        # session_state lets us remember results so they don't reshuffle on every rerun.
+        cache_key = f"mock::{top_destination}::{trip_spec.budget_per_night_usd}::{trip_spec.origin_airport}"
+
+        if cache_key not in st.session_state:
+            st.session_state[cache_key] = {
+        "hotels": get_mock_hotels(trip_spec, top_destination),
+        "restaurants": get_mock_restaurants(trip_spec, top_destination),
+        "flights": get_mock_flights(trip_spec, top_destination),
+    }
+
+        # Read cached results (stable)
+        hotels = st.session_state[cache_key]["hotels"]
+        restaurants = st.session_state[cache_key]["restaurants"]
+        flights = st.session_state[cache_key]["flights"]
 
         st.subheader("Suggested destinations")
         for d in destinations:
@@ -293,10 +321,6 @@ if submitted:
 
         st.divider()
         st.subheader(f"Top pick: {top_destination}")
-
-        hotels = get_mock_hotels(trip_spec, top_destination)
-        restaurants = get_mock_restaurants(trip_spec, top_destination)
-        flights = get_mock_flights(trip_spec, top_destination)
 
         # Hotels cards
         st.markdown("### Hotels (mock)")
