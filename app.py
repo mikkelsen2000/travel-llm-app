@@ -284,7 +284,7 @@ def get_mock_flights(trip_spec: TripSpec, destination_name: str) -> List[dict]:
 # 4) STREAMLIT UI (THE ACTUAL APP)
 # ---------------------------
 st.set_page_config(page_title="Travel Finder (MVP)", layout="wide")
-st.title("Travel Finder (MVP) v0.3")
+st.title("Travel Finder (MVP) v0.4")
 st.write("Paste your preferences. We'll turn them into a trip plan.")
 
 if st.button("Start over (clear cached results)"):
