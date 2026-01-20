@@ -1,3 +1,5 @@
+import requests
+import urllib.parse
 import streamlit as st
 from datetime import date
 import random
@@ -160,6 +162,70 @@ def get_mock_hotels(trip_spec: TripSpec, destination_name: str) -> List[dict]:
         )
     return out
 
+@st.cache_data(ttl=60 * 60)  # cache for 1 hour to avoid hitting Yelp rate limits
+def yelp_search_restaurants(destination_name: str, cuisines: tuple, price_filter: str, limit: int = 8):
+    """
+    Calls Yelp Fusion API to find restaurants in/near destination_name.
+
+    destination_name: e.g. "Innsbruck, Austria"
+    cuisines: tuple of strings, e.g. ("ramen", "tacos")
+    price_filter: Yelp uses "1,2,3,4" where 1=$ and 4=$$$$
+    limit: number of results to return
+    """
+
+    api_key = st.secrets.get("YELP_API_KEY")
+    if not api_key:
+        raise ValueError("Missing YELP_API_KEY in Streamlit secrets.")
+
+    url = "https://api.yelp.com/v3/businesses/search"  # Yelp business search endpoint :contentReference[oaicite:4]{index=4}
+
+    # If user listed cuisines, use them as the search term; otherwise use "restaurants"
+    if cuisines:
+        term = ", ".join([c for c in cuisines if c])  # join cuisines into a single query
+    else:
+        term = "restaurants"
+
+    headers = {
+        # Yelp auth: Authorization: Bearer API_KEY :contentReference[oaicite:5]{index=5}
+        "Authorization": f"Bearer {api_key}",
+        "accept": "application/json",
+    }
+
+    params = {
+        "term": term,
+        "location": destination_name,   # simplest approach; later we can use lat/long
+        "categories": "restaurants",
+        "limit": limit,
+        "sort_by": "rating",
+        "price": price_filter,          # e.g. "1,2"
+    }
+
+    resp = requests.get(url, headers=headers, params=params, timeout=20)
+
+    # If Yelp returns an error, show a useful message
+    if resp.status_code != 200:
+        raise RuntimeError(f"Yelp API error {resp.status_code}: {resp.text}")
+
+    data = resp.json()
+    businesses = data.get("businesses", [])
+
+    # Normalize Yelp fields into a simple list of dicts your UI can render
+    out = []
+    for b in businesses:
+        out.append({
+            "name": b.get("name"),
+            "image_url": b.get("image_url"),
+            "yelp_url": b.get("url"),  # link to Yelp business page (good for attribution) :contentReference[oaicite:6]{index=6}
+            "rating": b.get("rating"),
+            "review_count": b.get("review_count"),
+            "price": b.get("price"),
+            "categories": ", ".join([c["title"] for c in b.get("categories", []) if "title" in c]),
+            "address": ", ".join(b.get("location", {}).get("display_address", [])),
+        })
+
+    return out
+
+
 
 def get_mock_restaurants(trip_spec: TripSpec, destination_name: str) -> List[dict]:
     """
@@ -218,7 +284,7 @@ def get_mock_flights(trip_spec: TripSpec, destination_name: str) -> List[dict]:
 # 4) STREAMLIT UI (THE ACTUAL APP)
 # ---------------------------
 st.set_page_config(page_title="Travel Finder (MVP)", layout="wide")
-st.title("Travel Finder (MVP) v0.2")
+st.title("Travel Finder (MVP) v0.3")
 st.write("Paste your preferences. We'll turn them into a trip plan.")
 
 if st.button("Start over (clear cached results)"):
@@ -233,7 +299,7 @@ with st.form("trip_form"):
             "I'm a student traveling on a budget. Max $120/night. "
             "I prefer mountains and adventure over big cities. "
             "I like places like Banff and Innsbruck. "
-            "Food: ramen, tacos, cozy bakeries; avoid loud clubs."
+            "Food: Italian, Mexican, cozy bakeries; avoid loud clubs."
         ),
         height=140,
     )
@@ -299,21 +365,57 @@ if submitted:
             options=destination_names,
             index=0,  # default: first suggestion
         )
-        # Streamlit reruns the script often.
-        # session_state lets us remember results so they don't reshuffle on every rerun.
+
+        # ----------------------------
+        # (C) Budget -> Yelp price filter
+        # Yelp uses: 1=$, 2=$$, 3=$$$, 4=$$$$
+        # We'll map hotel budget to a rough restaurant price preference.
+        # ----------------------------
+        if trip_spec.budget_per_night_usd <= 60:
+            yelp_price = "1"
+        elif trip_spec.budget_per_night_usd <= 120:
+            yelp_price = "1,2"
+        elif trip_spec.budget_per_night_usd <= 200:
+            yelp_price = "1,2,3"
+        else:
+            yelp_price = "1,2,3,4"
+
+        # ----------------------------
+        # Cache results so they don't reshuffle on every Streamlit rerun
+        # ----------------------------
         cache_key = f"mock::{top_destination}::{trip_spec.budget_per_night_usd}::{trip_spec.origin_airport}"
 
         if cache_key not in st.session_state:
-            st.session_state[cache_key] = {
-        "hotels": get_mock_hotels(trip_spec, top_destination),
-        "restaurants": get_mock_restaurants(trip_spec, top_destination),
-        "flights": get_mock_flights(trip_spec, top_destination),
-    }
+            # Try to fetch real restaurants from Yelp.
+            # If Yelp fails (missing key, rate limit, location not found, etc.),
+            # we fall back to mock restaurants so the app still works.
+            try:
+                yelp_restaurants = yelp_search_restaurants(
+                    destination_name=top_destination,
+                    cuisines=tuple(trip_spec.preferred_cuisines),  # tuple is cache-friendly
+                    price_filter=yelp_price,
+                    limit=8,
+                )
+                restaurant_source = "Yelp"
+            except Exception as yelp_err:
+                yelp_restaurants = get_mock_restaurants(trip_spec, top_destination)
+                restaurant_source = "Mock (Yelp failed)"
+                # Save the error so you can inspect it in the UI
+                st.session_state["last_yelp_error"] = str(yelp_err)
 
-        # Read cached results (stable)
+            st.session_state[cache_key] = {
+                "hotels": get_mock_hotels(trip_spec, top_destination),
+                "restaurants": yelp_restaurants,
+                "flights": get_mock_flights(trip_spec, top_destination),
+                "restaurant_source": restaurant_source,
+            }
+
+
         hotels = st.session_state[cache_key]["hotels"]
         restaurants = st.session_state[cache_key]["restaurants"]
         flights = st.session_state[cache_key]["flights"]
+        restaurant_source = st.session_state[cache_key].get("restaurant_source", "Mock")
+
 
         st.subheader("Suggested destinations")
         for d in destinations:
@@ -332,13 +434,40 @@ if submitted:
                 st.write(f"${h['price_per_night']}/night • {h['neighborhood']}")
 
         # Restaurants cards
-        st.markdown("### Restaurants (mock)")
+        st.markdown(f"### Restaurants ({restaurant_source})")
+        st.caption("Powered by Yelp")  # basic attribution; keep links to Yelp pages too :contentReference[oaicite:8]{index=8}
+
         cols = st.columns(4)
         for i, r in enumerate(restaurants):
             with cols[i % 4]:
-                st.image(r["image"], use_container_width=True)
-                st.write(f"**{r['name']}**")
-                st.write(f"{r['type']} • {r['price_level']}")
+                # Yelp returns image_url; mocks return "image"
+                img = r.get("image_url") or r.get("image")
+                if img:
+                    st.image(img, use_container_width=True)
+
+                name = r.get("name", "Unknown")
+                yelp_url = r.get("yelp_url")
+
+                # If we have a Yelp URL, make the name clickable (good for attribution)
+                if yelp_url:
+                    st.markdown(f"**[{name}]({yelp_url})**")
+                else:
+                    st.write(f"**{name}**")
+
+                # Show some extra Yelp details if present
+                details = []
+                if r.get("categories"):
+                    details.append(r["categories"])
+                if r.get("price"):
+                    details.append(r["price"])
+                if r.get("rating") is not None:
+                    details.append(f"{r['rating']}⭐ ({r.get('review_count', 0)})")
+                if details:
+                    st.write(" • ".join(details))
+
+                if r.get("address"):
+                    st.caption(r["address"])
+
 
         # Flights list
         st.markdown("### Flights (mock)")
